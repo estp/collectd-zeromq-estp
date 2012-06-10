@@ -24,6 +24,8 @@
  *   Julien Ammous
  **/
 
+#define _XOPEN_SOURCE /* strptime */
+#define _BSD_SOURCE /* snprintf */
 #include "collectd.h"
 #include "common.h" /* auxiliary functions */
 #include "plugin.h" /* plugin_register_*, plugin_dispatch_values */
@@ -35,6 +37,10 @@
 # include <arpa/inet.h>
 #endif
 #include <pthread.h>
+#include <alloca.h>
+#include <time.h>
+#include <stdio.h>
+
 #include <zmq.h>
 
 struct cmq_socket_s {
@@ -59,12 +65,6 @@ static void cmq_close_callback (void *socket) /* {{{ */
     if (socket != NULL)
         (void) zmq_close (socket);
 } /* }}} void cmq_close_callback */
-
-static void free_data (void *data, void *hint) /* {{{ */
-{
-    free (data);
-} /* }}} void free_data */
-
 
 static void parse_message (char *data, int dlen)
 {
@@ -212,8 +212,6 @@ static void parse_message (char *data, int dlen)
 static void *receive_thread (void *cmq_socket) /* {{{ */
 {
     int status;
-    char *data = NULL;
-    size_t data_size;
 
     assert (cmq_socket != NULL);
 
@@ -247,8 +245,8 @@ static void *receive_thread (void *cmq_socket) /* {{{ */
 
 #define PACKET_SIZE   512
 
-static int put_single_value (void *socket, char *name, value_t value,
-                             value_list_t *vl, data_source_t *ds)
+static int put_single_value (void *socket, const char *name, value_t value,
+                             const value_list_t *vl, const data_source_t *ds)
 {
     int datalen;
     char data[640];
@@ -277,7 +275,7 @@ static int put_single_value (void *socket, char *name, value_t value,
             tstring, interval, value.absolute);
     } else {
         WARNING("ZeroMQ-ESTP: Unknown type");
-        return;
+        return -1;
     }
     zmq_msg_t msg;
 
