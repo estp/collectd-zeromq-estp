@@ -8,8 +8,8 @@ zeromq_estp.so: zeromq_estp.c collectd/src/config.h
 collectd/configure: collectd/configure.in
 	cd collectd; ./build.sh
 
-collectd/src/config.h: collectd/src/config.h.in
-	cd collectd: ./configure $(CONFIGURE_ARGS)
+collectd/src/config.h: collectd/configure
+	cd collectd; ./configure $(CONFIGURE_ARGS)
 
 clean:
 	rm zeromq_estp.so
