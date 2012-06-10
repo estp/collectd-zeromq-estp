@@ -25,3 +25,8 @@ The following is a basic build process::
     git submodule update --init
     make
     sudo make install
+
+Note: the build process clones full collectd repository and runs "configure" on
+it. You can ignore the whole configure output, as nothing except header files
+are used from collectd itself. If there is better way to build collectd plugin
+please send pull requests.
