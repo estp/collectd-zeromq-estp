@@ -74,11 +74,6 @@ static void parse_message (char *data, int dlen)
     unsigned long interval;
     char value[64];
 
-    char host[64];
-    char app[64];
-    char resource[64];
-    char metric[64];
-
     char *endline = memchr (data, '\n', dlen);
     if(!endline) {
         char *ndata = alloca(dlen+1);
@@ -97,6 +92,7 @@ static void parse_message (char *data, int dlen)
     struct tm timest;
     if (!strptime (timestamp, "%Y-%m-%dT%H:%M:%S", &timest)) {
         WARNING("ZeroMQ-ESTP: can't parse timestamp");
+        return;
     }
 
     int vdouble = 0;
@@ -203,7 +199,7 @@ static void parse_message (char *data, int dlen)
     memcpy(vl.type_instance, cpos, end-cpos);
     vl.type_instance[end-cpos] = 0;
 
-    vl.time = timegm(&timest);
+    vl.time = TIME_T_TO_CDTIME_T(timegm(&timest));
     vl.interval = TIME_T_TO_CDTIME_T(interval);
     vl.values = &val;
     vl.values_len = 1;
@@ -251,78 +247,58 @@ static void *receive_thread (void *cmq_socket) /* {{{ */
 
 #define PACKET_SIZE   512
 
-static int write_notification (const notification_t *n, user_data_t __attribute__((unused)) *user_data)
+static int put_single_value (void *socket, char *name, value_t value,
+                             value_list_t *vl, data_source_t *ds)
 {
-    char        buffer[PACKET_SIZE];
-    char       *buffer_ptr = buffer;
-    int         buffer_free = sizeof (buffer);
-    int         status;
-    zmq_msg_t   msg;
+    int datalen;
+    char data[640];
+    char tstring[32];
+    time_t timeval = CDTIME_T_TO_TIME_T(vl->time);
+    unsigned interval = CDTIME_T_TO_TIME_T(vl->interval);
+    struct tm tstruct;
+    gmtime_r(&timeval, &tstruct);
+    strftime(tstring, 32, "%Y-%m-%dT%H:%M:%S", &tstruct);
 
-    void *cmq_socket = user_data->data;
-
-    memset (buffer, '\0', sizeof (buffer));
-
-
-    status = write_part_number (&buffer_ptr, &buffer_free, TYPE_TIME, (uint64_t) n->time);
-    if (status != 0)
-        return (-1);
-
-    status = write_part_number (&buffer_ptr, &buffer_free, TYPE_SEVERITY, (uint64_t) n->severity);
-    if (status != 0)
-        return (-1);
-
-    if (strlen (n->host) > 0) {
-        status = write_part_string (&buffer_ptr, &buffer_free, TYPE_HOST, n->host, strlen (n->host));
-        if (status != 0)
-            return (-1);
+    if(ds->type == DS_TYPE_COUNTER) {
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %llu^",
+            vl->host, vl->plugin, vl->plugin_instance, name,
+            tstring, interval, value.counter);
+    } else if(ds->type == DS_TYPE_GAUGE) {
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %lf",
+            vl->host, vl->plugin, vl->plugin_instance, name,
+            tstring, interval, value.gauge);
+    } else if(ds->type == DS_TYPE_DERIVE) {
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %ld'",
+            vl->host, vl->plugin, vl->plugin_instance, name,
+            tstring, interval, value.derive);
+    } else if(ds->type == DS_TYPE_ABSOLUTE) {
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %lu+",
+            vl->host, vl->plugin, vl->plugin_instance, name,
+            tstring, interval, value.absolute);
+    } else {
+        WARNING("ZeroMQ-ESTP: Unknown type");
+        return;
     }
+    zmq_msg_t msg;
 
-    if (strlen (n->plugin) > 0) {
-        status = write_part_string (&buffer_ptr, &buffer_free, TYPE_PLUGIN, n->plugin, strlen (n->plugin));
-        if (status != 0)
-            return (-1);
-    }
-
-    if (strlen (n->plugin_instance) > 0) {
-        status = write_part_string (&buffer_ptr, &buffer_free, TYPE_PLUGIN_INSTANCE, n->plugin_instance,
-                                    strlen (n->plugin_instance));
-        if (status != 0)
-            return (-1);
-    }
-
-    if (strlen (n->type) > 0) {
-        status = write_part_string (&buffer_ptr, &buffer_free, TYPE_TYPE, n->type, strlen (n->type));
-        if (status != 0)
-            return (-1);
-    }
-
-    if (strlen (n->type_instance) > 0) {
-        status = write_part_string (&buffer_ptr, &buffer_free, TYPE_TYPE_INSTANCE, n->type_instance,
-                                    strlen (n->type_instance));
-        if (status != 0)
-            return (-1);
-    }
-
-    status = write_part_string (&buffer_ptr, &buffer_free, TYPE_MESSAGE, n->message, strlen (n->message));
-    if (status != 0)
-        return (-1);
-
-    // zeromq will free the memory when needed by calling the free_data function
-    if( zmq_msg_init_data(&msg, buffer, sizeof(buffer) - buffer_free, free_data, NULL) != 0 ) {
+    if(zmq_msg_init_size(&msg, datalen) != 0) {
         ERROR("zmq_msg_init : %s", zmq_strerror(errno));
         return 1;
     }
+    memcpy(zmq_msg_data(&msg), data, datalen);
 
     // try to send the message
-    if( zmq_send(cmq_socket, &msg, /* flags = */ 0) != 0 ) {
-        if( errno == EAGAIN ) {
-            WARNING("ZeroMQ: Cannot send message, queue is full");
+    if(zmq_send(socket, &msg, ZMQ_NOBLOCK) != 0) {
+        if(errno == EAGAIN) {
+            WARNING("ZeroMQ: Unable to queue message, queue may be full");
+            return -1;
         } else {
             ERROR("zmq_send : %s", zmq_strerror(errno));
-            return 1;
+            return -1;
         }
     }
+
+    DEBUG("ZeroMQ: data sent");
 
     return 0;
 }
@@ -331,45 +307,30 @@ static int write_value (const data_set_t *ds, /* {{{ */
                         const value_list_t *vl,
                         user_data_t *user_data)
 {
-    //void *cmq_socket = user_data->data;
+    assert (vl->values_len == ds->ds_num);
+    if(ds->ds_num > 1) {
+        int i;
+        for(i = 0; i < ds->ds_num; ++i) {
+            if(*vl->type_instance) {
+                char name[64];
+                int len;
+                len = snprintf(name, 63, "%s.%s",
+                    vl->type_instance, ds->ds[i].name);
+                name[len] = 0;
+                put_single_value(user_data->data,
+                    name, vl->values[i], vl, &ds->ds[i]);
+            } else {
+                put_single_value(user_data->data,
+                    ds->ds[i].name, vl->values[i], vl, &ds->ds[i]);
+            }
+        }
+    } else {
+        put_single_value(user_data->data,
+            vl->type_instance, vl->values[0], vl, &ds->ds[0]);
+    }
+    return 0;
+}
 
-    //zmq_msg_t msg;
-    //char      *send_buffer;
-    //int       send_buffer_size = PACKET_SIZE, real_size;
-
-    //send_buffer = malloc(PACKET_SIZE);
-    //if( send_buffer == NULL ) {
-    //  ERROR("Unable to allocate memory for send_buffer, aborting write");
-    //  return 1;
-    //}
-
-    //// empty buffer
-    //memset(send_buffer, 0, PACKET_SIZE);
-
-    //real_size = add_to_buffer(send_buffer, send_buffer_size, &send_buffer_vl, ds, vl);
-
-    //// zeromq will free the memory when needed by calling the free_data function
-    //if( zmq_msg_init_data(&msg, send_buffer, real_size, free_data, NULL) != 0 ) {
-    //  ERROR("zmq_msg_init : %s", zmq_strerror(errno));
-    //  return 1;
-    //}
-
-    //// try to send the message
-    //if( zmq_send(cmq_socket, &msg, ZMQ_NOBLOCK) != 0 ) {
-    //  if( errno == EAGAIN ) {
-    //    WARNING("ZeroMQ: Unable to queue message, queue may be full");
-    //    return -1;
-    //  }
-    //  else {
-    //    ERROR("zmq_send : %s", zmq_strerror(errno));
-    //    return -1;
-    //  }
-    //}
-
-    //DEBUG("ZeroMQ: data sent");
-
-    //return 0;
-} /* }}} int write_value */
 
 static int cmq_config_mode (oconfig_item_t *ci) /* {{{ */
 {
@@ -554,10 +515,6 @@ static int cmq_config_socket (oconfig_item_t *ci) /* {{{ */
         sending_sockets_num++;
 
         plugin_register_write (name, write_value, &ud);
-
-        ssnprintf (name, sizeof (name), "zeromq/%i/notif", sending_sockets_num);
-
-        plugin_register_notification (name, write_notification, &ud);
     }
 
     return (0);

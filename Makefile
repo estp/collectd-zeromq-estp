@@ -3,7 +3,7 @@ all: build
 build: zeromq_estp.so
 
 zeromq_estp.so: zeromq_estp.c collectd/src/config.h
-	gcc zeromq_estp.c -o zeromq_estp.so -shared -fPIC -lzmq -Icollectd/src -DHAVE_CONFIG_H
+	gcc zeromq_estp.c -o zeromq_estp.so -shared -fPIC -lzmq -Icollectd/src -DHAVE_CONFIG_H -Wall
 
 collectd/configure: collectd/configure.in
 	cd collectd; ./build.sh
