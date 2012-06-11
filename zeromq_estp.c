@@ -75,12 +75,12 @@ static void parse_message (char *data, int dlen)
     char value[64];
 
     char *endline = memchr (data, '\n', dlen);
-    if(!endline) {
-        char *ndata = alloca(dlen+1);
-        memcpy(ndata, data, dlen);
-        ndata[dlen] = 0;
-        data = ndata;
-    }
+    if(endline)
+        dlen = endline - data;
+    char *ndata = alloca(dlen+1);
+    memcpy(ndata, data, dlen);
+    ndata[dlen] = 0;
+    data = ndata;
 
     int rc = sscanf (data, "ESTP:%300s %31s %lu %63s",
                      fullname, timestamp, &interval, value);
@@ -113,26 +113,32 @@ static void parse_message (char *data, int dlen)
     value_t val;
 
 
-    if(*end == '\'') {
-        strcpy(vl.type, "derive");
-        if(vdouble) {
-            val.derive = dvalue;
+    if(*end == ':') {
+        ++end;
+        if(*end == 'd') {
+            strcpy(vl.type, "derive");  // FIXME: derive can be negative
+            if(vdouble) {
+                val.derive = dvalue;
+            } else {
+                val.derive = lvalue;
+            }
+        } else if(*end == 'c') {
+            strcpy(vl.type, "derive");  // non-wrapping counter
+            if(vdouble) {
+                val.counter = dvalue;
+            } else {
+                val.counter = lvalue;
+            }
+        } else if(*end == 'a') {
+            strcpy(vl.type, "absolute");
+            if(vdouble) {
+                val.absolute = dvalue;
+            } else {
+                val.absolute = lvalue;
+            }
         } else {
-            val.derive = lvalue;
-        }
-    } else if(*end == '^') {
-        strcpy(vl.type, "derive");
-        if(vdouble) {
-            val.counter = dvalue;
-        } else {
-            val.counter = lvalue;
-        }
-    } else if(*end == '+') {
-        strcpy(vl.type, "absolute");
-        if(vdouble) {
-            val.absolute = dvalue;
-        } else {
-            val.absolute = lvalue;
+            WARNING("ZeroMQ-ESTP: Unknown type");
+            return;
         }
     } else {
         strcpy(vl.type, "gauge");
@@ -258,7 +264,7 @@ static int put_single_value (void *socket, const char *name, value_t value,
     strftime(tstring, 32, "%Y-%m-%dT%H:%M:%S", &tstruct);
 
     if(ds->type == DS_TYPE_COUNTER) {
-        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %llu^",
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %llu:c",
             vl->host, vl->plugin, vl->plugin_instance, name,
             tstring, interval, value.counter);
     } else if(ds->type == DS_TYPE_GAUGE) {
@@ -266,11 +272,11 @@ static int put_single_value (void *socket, const char *name, value_t value,
             vl->host, vl->plugin, vl->plugin_instance, name,
             tstring, interval, value.gauge);
     } else if(ds->type == DS_TYPE_DERIVE) {
-        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %ld'",
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %ld:d",
             vl->host, vl->plugin, vl->plugin_instance, name,
             tstring, interval, value.derive);
     } else if(ds->type == DS_TYPE_ABSOLUTE) {
-        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %lu+",
+        datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %lu:a",
             vl->host, vl->plugin, vl->plugin_instance, name,
             tstring, interval, value.absolute);
     } else {
