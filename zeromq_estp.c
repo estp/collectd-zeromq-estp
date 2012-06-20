@@ -83,7 +83,7 @@ static void dispatch_entry(char *fullname, char *timestamp, time_t interval,
     value_list_t vl;
     strcpy(vl.type, vtype);
 
-    if (!strptime (timestamp, "%Y-%m-%dT%H:%M:%S", &timest)) {
+    if (!strptime (timestamp, "%Y-%m-%dT%H:%M:%SZ", &timest)) {
         WARNING("ZeroMQ-ESTP: can't parse timestamp");
         return;
     }
@@ -425,7 +425,7 @@ static int put_single_value (void *socket, const char *name, value_t value,
     unsigned interval = CDTIME_T_TO_TIME_T(vl->interval);
     struct tm tstruct;
     gmtime_r(&timeval, &tstruct);
-    strftime(tstring, 32, "%Y-%m-%dT%H:%M:%S", &tstruct);
+    strftime(tstring, 32, "%Y-%m-%dT%H:%M:%SZ", &tstruct);
 
     if(ds->type == DS_TYPE_COUNTER) {
         datalen = snprintf(data, 640, "ESTP:%s:%s:%s:%s: %s %d %llu:c%s",
