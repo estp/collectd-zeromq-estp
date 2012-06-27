@@ -44,7 +44,7 @@
 
 struct cmq_socket_s {
     void *socket;
-    int type;
+    pthread_mutex_t mutex;
 };
 typedef struct cmq_socket_s cmq_socket_t;
 
@@ -66,15 +66,19 @@ static c_avl_tree_t *staging = NULL;
 static pthread_t *receive_thread_ids = NULL;
 static size_t     receive_thread_num = 0;
 static int        sending_sockets_num = 0;
+static pthread_mutex_t staging_mutex;
 
 // private data
 static int thread_running = 1;
 static pthread_t listen_thread_id;
 
-static void cmq_close_callback (void *socket) /* {{{ */
+static void cmq_close_callback (void *value) /* {{{ */
 {
-    if (socket != NULL)
-        (void) zmq_close (socket);
+    cmq_socket_t *val = value;
+    if (val->socket != NULL)
+        (void) zmq_close (val->socket);
+    pthread_mutex_destroy(&val->mutex);
+    free(value);
 } /* }}} void cmq_close_callback */
 
 static void dispatch_entry(char *fullname, char *timestamp, time_t interval,
@@ -367,8 +371,10 @@ static void parse_message (char *data, int dlen)
                 if(!strcmp(ekey, "type")) {
                     strncpy(vtype, evalue, 64);
                 } else if(!strcmp(ekey, "items")) {
+                    pthread_mutex_lock(&staging_mutex);
                     dispatch_multi_entry(fullname, timestamp, interval,
                                          vtype, evalue, val);
+                    pthread_mutex_unlock(&staging_mutex);
                     return;
                 }
             }
@@ -414,7 +420,8 @@ static void *receive_thread (void *cmq_socket) /* {{{ */
 
 #define PACKET_SIZE   512
 
-static int put_single_value (void *socket, const char *name, value_t value,
+static int put_single_value (cmq_socket_t *sockstr,
+                             const char *name, value_t value,
                              const value_list_t *vl, const data_source_t *ds,
                              char *extdata)
 {
@@ -456,7 +463,11 @@ static int put_single_value (void *socket, const char *name, value_t value,
     memcpy(zmq_msg_data(&msg), data, datalen);
 
     // try to send the message
-    if(zmq_send(socket, &msg, ZMQ_NOBLOCK) != 0) {
+
+    pthread_mutex_lock(&sockstr->mutex);
+    int rc = zmq_send(sockstr->socket, &msg, ZMQ_NOBLOCK);
+    pthread_mutex_unlock(&sockstr->mutex);
+    if(rc != 0) {
         if(errno == EAGAIN) {
             WARNING("ZeroMQ: Unable to queue message, queue may be full");
             return -1;
@@ -501,10 +512,10 @@ static int write_value (const data_set_t *ds, /* {{{ */
                 len = snprintf(name, 63, "%s.%s",
                     vl->type_instance, ds->ds[i].name);
                 name[len] = 0;
-                put_single_value(user_data->data,
+                put_single_value((cmq_socket_t *)user_data->data,
                     name, vl->values[i], vl, &ds->ds[i], extdata);
             } else {
-                put_single_value(user_data->data,
+                put_single_value((cmq_socket_t *)user_data->data,
                     ds->ds[i].name, vl->values[i], vl, &ds->ds[i], extdata);
             }
         }
@@ -516,7 +527,7 @@ static int write_value (const data_set_t *ds, /* {{{ */
            && strcmp(ds->type, "absolute")) {
             sprintf(extdata, "\n :collectd: type=%s", ds->type);
         }
-        put_single_value(user_data->data,
+        put_single_value((cmq_socket_t *)user_data->data,
             vl->type_instance, vl->values[0], vl, &ds->ds[0], extdata);
     }
     return 0;
@@ -698,8 +709,18 @@ static int cmq_config_socket (oconfig_item_t *ci) /* {{{ */
     else if ((type == ZMQ_PUB) || (type == ZMQ_PUSH)) {
         user_data_t ud = { NULL, NULL };
         char name[20];
+        cmq_socket_t *sockstr = malloc(sizeof(cmq_socket_t));
+        if(!sockstr) {
+            char errbuf[1024];
+            ERROR ("zeromq plugin: malloc failed: %s",
+                   sstrerror (errno, errbuf, sizeof (errbuf)));
+            (void) zmq_close (cmq_socket);
+            return (-1);
+        }
 
-        ud.data = cmq_socket;
+        sockstr->socket = cmq_socket;
+        pthread_mutex_init(&sockstr->mutex, NULL);
+        ud.data = sockstr;
         ud.free_func = cmq_close_callback;
 
         ssnprintf (name, sizeof (name), "zeromq/%i", sending_sockets_num);
@@ -756,6 +777,7 @@ static int plugin_init (void)
     int major, minor, patch;
     zmq_version (&major, &minor, &patch);
     INFO("ZeroMQ plugin loaded (zeromq v%d.%d.%d).", major, minor, patch);
+    pthread_mutex_init(&staging_mutex, NULL);
     staging = c_avl_create ((void *) strcmp);
     if (staging == NULL) {
         ERROR("ZeroMQ-ESTP : c_avl_create failed: %s", strerror(errno));
@@ -796,6 +818,7 @@ static int my_shutdown (void)
 
         c_avl_destroy (staging);
     }
+    pthread_mutex_destroy(&staging_mutex);
 
     return 0;
 }
